@@ -1,0 +1,70 @@
+# https://blog.logto.io/zh-CN/automatic-github-workflow-rerun
+name: Flutter Tag Build
+
+on:
+  workflow_dispatch:
+    # 为手动触发新增 tag 输入参数，支持指定非最新 tag
+    inputs:
+      specified_tag:
+        description: '手动指定需要构建的 Tag（留空则使用最新 Tag）'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+-[0-9]+'
+  schedule:
+    - cron: '0 */4 * * *'  # 每4小时运行一次
+
+jobs:
+  get-target-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      target_tag: ${{ steps.determine-tag.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取所有历史，确保标签信息完整
+
+      - name: Determine target Tag (based on trigger)
+        id: determine-tag
+        run: |
+          # 1. 处理 workflow_dispatch 触发：优先使用手动指定的 tag，无指定则用最新
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.specified_tag }}" ]; then
+            target_tag="${{ github.event.inputs.specified_tag }}"
+            echo "使用手动指定的 Tag: $target_tag"
+          # 2. 处理 push 触发：直接使用当前推送的 tag（github.ref_name 即 tag 名）
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            target_tag="${{ github.ref_name }}"
+            echo "使用 Push 触发的当前 Tag: $target_tag"
+          # 3. 处理 schedule 触发：获取仓库最新 tag
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            rulast_version=$(grep -m 1 -oP 'version = "[0-9]+.[0-9]+.[0-9]+"' ./Cargo.toml)
+            target_tag=$(echo "$rulast_version" | grep -m 1 -oP '[0-9]+.[0-9]+.[0-9]+')
+            echo "使用 Schedule 触发的最新 Tag: $target_tag"
+          # 4. 兜底：默认获取最新 tag（应对未覆盖的边缘场景）
+          else
+            rulast_version=$(grep -m 1 -oP 'version = "[0-9]+.[0-9]+.[0-9]+"' ./Cargo.toml)
+            target_tag=$(echo "$rulast_version" | grep -m 1 -oP '[0-9]+.[0-9]+.[0-9]+')
+            echo "使用默认最新 Tag: $target_tag"
+          fi
+
+          # 验证 tag 非空（避免构建失败）
+          if [ -z "$target_tag" ]; then
+            echo "错误：未找到可用的 Tag，请先在仓库创建 Tag"
+            exit 1
+          fi
+
+          # 写入输出变量，供后续构建使用
+          echo "tag=$target_tag" >> $GITHUB_OUTPUT
+
+  run-flutter-tag-build:
+    needs: get-target-tag  # 依赖 tag 确定作业，确保参数正确
+    uses: ./.github/workflows/flutter-build.yml
+    secrets: inherit
+    with:
+      upload-artifact: true
+      upload-tag: ${{ needs.get-target-tag.outputs.target_tag }}  # 传递最终确定的 tag
